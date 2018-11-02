@@ -1,5 +1,7 @@
 using LinearAlgebra
 import DataStructures
+using PyCall
+@pyimport PyFoam
 
 function readRegion(case::String)
 	if !isfile(join([case,"constant","regionProperties"],"/"))
@@ -268,6 +270,23 @@ function runCase(case::String)
 	cd(curDir)
 end
 
+function mag(f::Array)
+    ans = Float64[]
+    if ndims(f) == 1
+        for l in 1:length(f)
+            push!(ans,abs(f[l]))
+        end
+    else
+        for l in 1:size(f)[1]
+            push!(ans,norm(f[l,:]))
+        end
+    end
+    return ans
+end
+
+using PyCall
+@pyimport src.toJulia as pyFoam
+
 function field(case::String, name::String, time::Any, region::String)
     timeDir = convert(String,time)
     if time == "latestTime"
@@ -278,76 +297,5 @@ function field(case::String, name::String, time::Any, region::String)
         file = join([case,timeDir,region,name],"/")
     end
     
-    dimensions = Int8[]
-    internalField = Float64[]
-    boundaryField = Dict()
-    skipL = Int64[]
-    startFlg = false
-    open(file,"r") do f
-        lines = readlines(f)
-        for l in 1:length(lines)
-			if l in skipL
-				continue
-			end
-			line = lines[l]
-			#println(line)
-			if startswith(line,"dimensions")
-				p0 = findfirst(isequal('['),line)
-				dim = split(line[p0+1:end-2])
-				for d in dim
-					push!(dimensions,parse(Int8,d))
-				end
-			end
-			if startswith(line,"internalField")
-				if findfirst(isequal(';'),line) != nothing
-					f = match(r"^([0-9.]+)$",line)
-					internalField = parse(Float64,f.captures[1])
-				else
-					for ll in l+3:length(lines)
-						push!(skipL,ll)
-						line = lines[ll]
-						if startswith(line,")")
-							break
-						end
-						
-						f = match(r"^([0-9.]+)$",line)
-						push!(internalField,parse(Float64,f.captures[1]))
-						
-						if findfirst(isequal(')'),line) != nothing
-							break
-						end
-					end
-				end
-			end
-			#=
-			if startswith(line,"boundaryField")
-				for ll in l+2:length(lines)
-					if ll in skipL
-						continue
-					end
-					push!(skipL,ll)
-					line = lines[ll]
-					if startswith(line,"}")
-						break
-					end
-					if findfirst(isequal('{'),line) != nothing
-						bName = lines[ll-1]
-						bDict = Dict()
-						for lll in ll+1:length(lines)
-							push!(skipL,lll)
-							if findfirst(isequal('values'),line) != nothing
-								boundaryField[bName] = bDict
-								break
-							end
-						end
-					end
-				end
-			end
-			=#
-            if length(dimensions)>0 && length(internalField)>0 && length(boundaryField)>0
-				break
-            end
-        end
-    end
-    return Dict("dimensions"=>dimensions,"internalField"=>internalField,"boundaryField"=>boundaryField)
+    return pyFoam.readDict(file)
 end
