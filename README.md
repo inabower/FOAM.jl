@@ -15,7 +15,8 @@ Pkg.add("PyPlot")
 Pkg.add("PyCall")
 Pkg.add("DataStructures")
 ```
-#Example
+# Example
+
 ![Example](src/example.png)
 
 ## Tasks
