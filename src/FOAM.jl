@@ -299,3 +299,8 @@ function field(case::String, name::String, time::Any, region::String)
     
     return pyFoam.readDict(file)
 end
+
+function boundary(case::String)
+
+
+end
