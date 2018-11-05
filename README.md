@@ -2,19 +2,30 @@
 
 - Julia : v1.0.1
 - OpenFOAM : v1806
+- Python : 3.6.4 (anaconda 4.4.10)
 
 ```
-#in python
 pip install PyFoam
 
-#in Julia
+julia
+
 using Pkg
 
 Pkg.add("IJulia")
 Pkg.add("PyPlot")
+#ENV["PYTHON"] = /path/to/python/which/installed/PyFoam
+#ENV["PYTHON"] = /home/user/.conda/env/py3/bin/python
+#ENV["PYTHON"] = /home/user/Applications/anaconda3/bin/python
 Pkg.add("PyCall")
 Pkg.add("DataStructures")
+
+exit()
+
+export JULIA_NUM_THREADS=4
+
+jupyter lab
 ```
+
 # Example
 
 ![Example](src/example.png)
@@ -34,4 +45,7 @@ Pkg.add("DataStructures")
     - __done__ checkMesh
   - __done__ read regionProperties
 - __ok__ read system
+- __ok__ boundaryField
+- __ok?__ parallel thread
+- reconstruct and rm reconstructed times of decDir
 - parseDict without pyFoam
