@@ -1,6 +1,10 @@
 using LinearAlgebra
 import DataStructures
 
+using PyCall
+pushfirst!(PyVector(pyimport("sys")["path"]), "..")
+@pyimport src.toJulia as pyFoam
+
 function readRegion(case::String)
 	if !isfile(join([case,"constant","regionProperties"],"/"))
 		return Dict("master"=>"None")
@@ -151,7 +155,7 @@ function readListFile(file::String, typ::String, isVector::Bool)
     end
 end
 
-function checkMesh(case::String)
+function meshProperties(case::String)
     regions = readRegion(case)
     polyMeshDir = Dict()
     if length(regions) > 0
@@ -165,7 +169,9 @@ function checkMesh(case::String)
     else
         polyMeshDir["master"] = join([case,"constant","polyMesh"],"/")
     end
-    meshProperties = Dict()
+    meshProp = Dict()
+    meshProp["regions"] = regions
+    meshProp["case"] = case
     for region in keys(polyMeshDir)
         masterDir = get(polyMeshDir,region,0)
 
@@ -173,7 +179,15 @@ function checkMesh(case::String)
         points = readListFile(join((masterDir,"points"),"/"), "float", true)
         owner = readListFile(join((masterDir,"owner"),"/"), "int", false)
         neighbour = readListFile(join((masterDir,"neighbour"),"/"), "int", false)
-
+        
+        boundingBox = [[1.e10,1.e10,1.e10],[-1.e10,-1.e10,-1.e10]]
+        for pi in 1:length(points)
+            for x in 1:3
+                boundingBox[1][x] = min(points[pi][x], boundingBox[1][x])
+                boundingBox[2][x] = max(points[pi][x], boundingBox[2][x])
+            end
+        end
+        
         nCells = max(maximum(owner),maximum(neighbour))
 
         fCtrs = Any[]
@@ -256,9 +270,41 @@ function checkMesh(case::String)
             end
         end
         cellVols /= 3.0
-        meshProperties[region] = Dict("nPoints"=>length(points), "nFaces"=>length(faces), "nCells"=>nCells, "faceCentres" => fCtrs, "faceAreas" => fAreas, "faceAreaValues" => fAreaValues, "cellCentres" => cellCtrs, "cellVolumes" => cellVols)
+        meshProp[region] = Dict("nPoints"=>length(points), "nFaces"=>length(faces), "nCells"=>nCells, "faceCentres" => fCtrs, "faceAreas" => fAreas, "faceAreaValues" => fAreaValues, "cellCentres" => cellCtrs, "cellVolumes" => cellVols, "points"=>points,"faces"=>faces, "owner"=>owner,"neighbour"=>neighbour, "boundingBox"=>boundingBox,"boundary"=>boundary(case,region,fAreas))
     end
-    return meshProperties
+    return meshProp
+end
+
+function checkMesh(meshProp::Any)
+    case = meshProp["case"]
+    for region in keys(meshProp["regions"])
+        println("For region ", region)
+        println("  nPoints = ",meshProp[region]["nPoints"])
+        println("  nFaces = ",meshProp[region]["nFaces"])
+        println("  nCells = ",meshProp[region]["nCells"])
+        println(" Face Area")
+        println("  Min = ",minimum(meshProp[region]["faceAreaValues"]))
+        println("  Max = ",maximum(meshProp[region]["faceAreaValues"]))
+        println(" Volume")
+        println("  Min = ",minimum(meshProp[region]["cellVolumes"]))
+        println("  Max = ",maximum(meshProp[region]["cellVolumes"]))
+        println("  Total = ",sum(meshProp[region]["cellVolumes"]))
+        println(" Bounding Box")
+        println("  Min = ",meshProp[region]["boundingBox"][1])
+        println("  Max = ",meshProp[region]["boundingBox"][2])
+        fields = fieldList(case, "latestTime", string(region))
+        print(" Fields : \n  ")
+        for f in fields
+            print(f," ")
+        end
+        println()
+        boundaryList = meshProp[region]["boundary"]
+        for b in keys(boundaryList)
+            println(" For Boundary ", b)
+            print("    surface area : ",boundaryList[b]["magSurfaceArea"])
+            println(" (vec) : ",boundaryList[b]["totalSurfaceArea"])
+        end
+    end
 end
 
 function runCase(case::String)
@@ -266,6 +312,32 @@ function runCase(case::String)
 	cd(case)
 	run(`foamRunTutorials`)
 	cd(curDir)
+end
+
+function nearestCell(p::Array{Float64}, meshProp::Any)
+    ans = 0
+    dist = 1.0e10
+    for n in length(meshProp["cellCentres"])
+        if dist > norm(meshProp["cellCentres"][n] - p)
+            dist = norm(meshProp["cellCentres"][n] - p)
+            ans = n
+        end
+    end
+    return ans
+end
+
+function mag(f::Array)
+    ans = Float64[]
+    if ndims(f) == 1
+        for l in 1:length(f)
+            push!(ans,abs(f[l]))
+        end
+    else
+        for l in 1:size(f)[1]
+            push!(ans,norm(f[l,:]))
+        end
+    end
+    return ans
 end
 
 function field(case::String, name::String, time::Any, region::String)
@@ -278,76 +350,93 @@ function field(case::String, name::String, time::Any, region::String)
         file = join([case,timeDir,region,name],"/")
     end
     
-    dimensions = Int8[]
-    internalField = Float64[]
-    boundaryField = Dict()
-    skipL = Int64[]
-    startFlg = false
-    open(file,"r") do f
-        lines = readlines(f)
-        for l in 1:length(lines)
-			if l in skipL
-				continue
-			end
-			line = lines[l]
-			#println(line)
-			if startswith(line,"dimensions")
-				p0 = findfirst(isequal('['),line)
-				dim = split(line[p0+1:end-2])
-				for d in dim
-					push!(dimensions,parse(Int8,d))
-				end
-			end
-			if startswith(line,"internalField")
-				if findfirst(isequal(';'),line) != nothing
-					f = match(r"^([0-9.]+)$",line)
-					internalField = parse(Float64,f.captures[1])
-				else
-					for ll in l+3:length(lines)
-						push!(skipL,ll)
-						line = lines[ll]
-						if startswith(line,")")
-							break
-						end
-						
-						f = match(r"^([0-9.]+)$",line)
-						push!(internalField,parse(Float64,f.captures[1]))
-						
-						if findfirst(isequal(')'),line) != nothing
-							break
-						end
-					end
-				end
-			end
-			#=
-			if startswith(line,"boundaryField")
-				for ll in l+2:length(lines)
-					if ll in skipL
-						continue
-					end
-					push!(skipL,ll)
-					line = lines[ll]
-					if startswith(line,"}")
-						break
-					end
-					if findfirst(isequal('{'),line) != nothing
-						bName = lines[ll-1]
-						bDict = Dict()
-						for lll in ll+1:length(lines)
-							push!(skipL,lll)
-							if findfirst(isequal('values'),line) != nothing
-								boundaryField[bName] = bDict
-								break
-							end
-						end
-					end
-				end
-			end
-			=#
-            if length(dimensions)>0 && length(internalField)>0 && length(boundaryField)>0
-				break
-            end
-        end
+    return pyFoam.readDict(file)
+end
+
+function boundary(case::String, region::String, fAreas::Any)
+    file = ""
+    if region == nothing || region == "master"
+        file = joinpath(case,"constant","polyMesh","boundary")
+    else
+        file = joinpath(case,"constant",region,"polyMesh","boundary")
     end
-    return Dict("dimensions"=>dimensions,"internalField"=>internalField,"boundaryField"=>boundaryField)
+    boundaries = pyFoam.readBoundaryDict(file)
+    for b in keys(boundaries)
+        #println(b)
+        #println(fAreas)
+        sFace = boundaries[b]["startFace"]+1
+        eFace = sFace + boundaries[b]["nFaces"]-1
+        tA = Array{Any,1}()
+        sumA = Float64[0,0,0]
+        magA = 0.0
+        for fi in sFace:eFace
+            push!(tA,fAreas[fi])
+            sumA += fAreas[fi]
+            magA += norm(fAreas[fi])
+        end
+        boundaries[b]["surfaceArea"] = tA
+        boundaries[b]["totalSurfaceArea"] = sumA
+        boundaries[b]["magSurfaceArea"] = magA
+    end
+    return boundaries
+end
+
+function boundaryField(Uf::Any, meshProp::Any, isVector::Bool)
+    Ubf = Uf["boundaryField"]
+    boundaries = meshProp["boundary"]
+    owner = meshProp["owner"]
+    U = Dict()
+    for b in keys(boundaries)
+        sFace = boundaries[b]["startFace"]+1
+        eFace = sFace + boundaries[b]["nFaces"]-1
+        if isVector
+            tU = Array{Any,1}()
+        else
+            tU = Float64[]
+        end
+        Ubff = Ubf[b]
+        Utype = Ubff["type"]
+        bi = 1
+        #println(Utype)
+        for fi in sFace:eFace
+            if isVector
+                if in("value", keys(Ubff))
+                    if length(Ubff["value"]) >= (eFace - sFace)
+                        push!(tU,Ubff["value"][bi,:])
+                    else
+                        push!(tU,Ubff["value"])
+                    end
+                elseif Utype == "noSlip"
+                    push!(tU,Float64[0,0,0])
+                elseif Utype == "zeroGradient"
+                    if length(Uf["internalField"]) >= meshProp["nCells"]
+                        ownerCell = owner[fi]
+                        push!(tU,Uf["internalField"][ownerCell,:])
+                    else
+                        push!(tU,Uf["internalField"])
+                    end
+                end
+            else
+                if in("value", keys(Ubff))
+                    if length(Ubff["value"]) >= (eFace - sFace)
+                        push!(tU,Ubff["value"][bi])
+                    else
+                        push!(tU,Ubff["value"])
+                    end
+                elseif Utype == "uniformTotalPressure"
+                    push!(tU,Ubff["p0"][2][3])
+                elseif Utype == "zeroGradient"
+                    if length(Uf["internalField"]) >= meshProp["nCells"]
+                        ownerCell = owner[fi]
+                        push!(tU,Uf["internalField"][ownerCell])
+                    else
+                        push!(tU,Uf["internalField"])
+                    end
+                end
+            end
+            bi += 1
+        end
+        U[b] = tU
+    end
+    return U
 end
