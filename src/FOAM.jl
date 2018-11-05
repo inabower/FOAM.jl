@@ -173,6 +173,7 @@ function meshProperties(case::String)
     meshProp["regions"] = regions
     meshProp["case"] = case
     for region in keys(polyMeshDir)
+        println(region)
         masterDir = get(polyMeshDir,region,0)
 
         faces = readListFile(join((masterDir,"faces"),"/"), "int", true)
@@ -190,18 +191,19 @@ function meshProperties(case::String)
         
         nCells = max(maximum(owner),maximum(neighbour))
 
-        fCtrs = Any[]
-        fAreas = Any[]
-        fAreaValues = Float64[]
-        for f in faces
+        fCtrs = [zeros(Float64,3) for i in 1:length(faces)]
+        fAreas = [zeros(Float64,3) for i in 1:length(faces)]
+        fAreaValues = zeros(Float64,length(faces))
+        @threads for i in 1:length(faces)
+            f = faces[i]
             sumN = zeros(Float64, 3)
             sumA = 0.0
             sumAc = zeros(Float64, 3)
             nPoints = length(f)
 
             if nPoints == 3
-                push!(fCtrs,(1.0/3.0)*(points[f[1]] + points[f[2]] + points[f[3]]))
-                push!(fAreas,0.5*cross((points[f[2]] - points[f[1]]),(points[f[3]] - points[f[1]])))
+                fCtrs[i] = (1.0/3.0)*(points[f[1]] + points[f[2]] + points[f[3]])
+                fAreas[i] = 0.5*cross((points[f[2]] - points[f[1]]),(points[f[3]] - points[f[1]]))
             else
                 fCentre = zeros(Float64, 3)
                 for fi in f
@@ -210,7 +212,6 @@ function meshProperties(case::String)
                 for pi in 1:length(f)
                     thisPoint = points[f[pi]]
                     nextPoint = points[f[(pi%nPoints)+1]]
-                    print()
                     c = thisPoint + nextPoint + fCentre
                     n = cross((nextPoint - thisPoint),(fCentre-thisPoint))
                     a = norm(n)
@@ -220,13 +221,13 @@ function meshProperties(case::String)
                 end
 
 				if sumA < 1e-8
-					push!(fCtrs,fCentre)
-					push!(fAreas,zeros(Float64, 3))
-					push!(fAreaValues,0.0)
+					fCtrs[i] = fCentre
+					fAreas[i] = zeros(Float64, 3)
+					fAreaValues[i] = 0.0
 				else
-					push!(fCtrs,sumAc/sumA/3.0)
-					push!(fAreas,0.5*sumN)
-					push!(fAreaValues,0.5*norm(sumN))
+					fCtrs[i] = sumAc/sumA/3.0
+					fAreas[i] = 0.5*sumN
+					fAreaValues[i] = 0.5*norm(sumN)
 				end
             end
         end #end of face loop
@@ -237,32 +238,32 @@ function meshProperties(case::String)
         cEst = fill(zeros(Float64,3),nCells)
         nCellFaces = zeros(Int8, nCells)
 
-        for facei in 1:length(owner)
+        @threads for facei in 1:length(owner)
             cEst[owner[facei]] += fCtrs[facei]
             nCellFaces[owner[facei]] += 1
         end
-        for facei in 1:length(neighbour)
+        @threads for facei in 1:length(neighbour)
             cEst[neighbour[facei]] += fCtrs[facei]
             nCellFaces[neighbour[facei]] += 1
         end
-        for celli in 1:nCells
+        @threads for celli in 1:nCells
             cEst[celli] /= nCellFaces[celli]
         end
 
-        for facei in 1:length(owner)
+        @threads for facei in 1:length(owner)
             pyr3Vol = norm(dot(fAreas[facei], (fCtrs[facei] - cEst[owner[facei]])) )
             pc = (3.0/4.0)*fCtrs[facei] + (1.0/4.0)*cEst[owner[facei]]
             cellCtrs[owner[facei]] += pyr3Vol*pc
             cellVols[owner[facei]] += pyr3Vol
         end
-        for facei in 1:length(neighbour)
+        @threads for facei in 1:length(neighbour)
             pyr3Vol = norm(dot(fAreas[facei], (fCtrs[facei] - cEst[neighbour[facei]])) )
             pc = (3.0/4.0)*fCtrs[facei] + (1.0/4.0)*cEst[neighbour[facei]]
             cellCtrs[neighbour[facei]] += pyr3Vol*pc
             cellVols[neighbour[facei]] += pyr3Vol
         end
 
-        for celli in 1:nCells
+        @threads for celli in 1:nCells
             if abs(cellVols[celli])<1e-16
                 cellCtrs[celli] /= cellVols[celli]
             else
@@ -270,7 +271,7 @@ function meshProperties(case::String)
             end
         end
         cellVols /= 3.0
-        meshProp[region] = Dict("nPoints"=>length(points), "nFaces"=>length(faces), "nCells"=>nCells, "faceCentres" => fCtrs, "faceAreas" => fAreas, "faceAreaValues" => fAreaValues, "cellCentres" => cellCtrs, "cellVolumes" => cellVols, "points"=>points,"faces"=>faces, "owner"=>owner,"neighbour"=>neighbour, "boundingBox"=>boundingBox,"boundary"=>boundary(case,region,fAreas))
+        meshProp[region] = Dict("nPoints"=>length(points), "nFaces"=>length(faces), "nCells"=>nCells, "faceCentres" => fCtrs, "faceAreas" => fAreas, "faceAreaValues" => fAreaValues, "cellCentres" => cellCtrs, "cellVolumes" => cellVols, "points"=>points,"faces"=>faces, "owner"=>owner,"neighbour"=>neighbour, "boundingBox"=>boundingBox,"boundary"=>boundary(case,string(region),fAreas))
     end
     return meshProp
 end
@@ -317,7 +318,7 @@ end
 function nearestCell(p::Array{Float64}, meshProp::Any)
     ans = 0
     dist = 1.0e10
-    for n in length(meshProp["cellCentres"])
+    @threads for n in length(meshProp["cellCentres"])
         if dist > norm(meshProp["cellCentres"][n] - p)
             dist = norm(meshProp["cellCentres"][n] - p)
             ans = n
@@ -398,7 +399,7 @@ function boundaryField(Uf::Any, meshProp::Any, isVector::Bool)
         Utype = Ubff["type"]
         bi = 1
         #println(Utype)
-        for fi in sFace:eFace
+        @threads for fi in sFace:eFace
             if isVector
                 if in("value", keys(Ubff))
                     if length(Ubff["value"]) >= (eFace - sFace)
